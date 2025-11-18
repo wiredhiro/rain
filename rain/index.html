@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Rain Drop Liquid Simulation</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #f5f5f2;
+        overflow: hidden;
+      }
+      canvas {
+        display: block;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+
+    <script>
+      const canvas = document.getElementById('canvas');
+      const ctx = canvas.getContext('2d');
+
+      let width = window.innerWidth;
+      let height = window.innerHeight;
+      canvas.width = width;
+      canvas.height = height;
+
+      // 水面ライン（リサイズに合わせて更新するので let）
+      let baseY = height * 0.6;
+
+      // ======== 1D 水面モデル ========
+      const N = 120;
+      let h = new Array(N).fill(0); // 高さ
+      let v = new Array(N).fill(0); // 速度
+
+      const SPREAD = 0.08;
+      const VISCOSITY = 0.4;
+      const DAMPING = 0.94;
+
+      // ======== 雨粒 ========
+      let raindrops = [];
+
+      // 雨の強さ（0〜1）
+      let rainIntensity = 0.4;
+      let targetIntensity = 0.4;
+      let lastTime = 0;
+      let nextIntensityChangeTime = 0;
+      let dropAccumulator = 0;
+
+      // 1/f ゆらぎ用の内部状態
+      let pinkSlow = 0;
+      let pinkMid = 0;
+      let pinkFast = 0;
+
+      // 短いスパンの「激しい雨」用の状態
+      let stormActive = false;
+      let stormEndTime = 0;
+      let nextStormTime = 0;
+
+      function createRaindrop(x) {
+        const drop = {
+          x: x,
+          y: -Math.random() * 100 - 20, // 画面上のランダム位置から落ちてくる
+          vy: Math.random() * 2 + 4, // 初速（少しゆっくり）
+          length: Math.random() * 15 + 10, // 雨粒の長さ
+          mass: 0.4, // 波への影響用
+          gravity: 0.3,
+        };
+        raindrops.push(drop);
+      }
+
+      function resetRaindrop(drop) {
+        drop.x = Math.random() * width;
+        drop.y = -Math.random() * 100 - 20;
+        drop.vy = Math.random() * 2 + 4; // createRaindrop と同じスピード帯
+        drop.length = Math.random() * 15 + 10;
+      }
+
+      function xToIndex(x) {
+        return Math.floor((x / width) * (N - 1));
+      }
+
+      function applySplash(x, strength) {
+        const idx = xToIndex(x);
+        const s = -Math.abs(strength); // 谷へ
+        const radius = 6; // 波を広めに押し下げて自然に
+
+        for (let offset = -radius; offset <= radius; offset++) {
+          const ii = idx + offset;
+          if (ii <= 0 || ii >= N - 1) continue;
+
+          const falloff =
+            Math.cos((Math.abs(offset) / radius) * Math.PI) * 0.5 + 0.5;
+          h[ii] += s * falloff;
+        }
+      }
+
+      function updateWave() {
+        const prevH = [...h];
+
+        // スプレッド・粘性による速度更新
+        for (let i = 1; i < N - 1; i++) {
+          const pressure = prevH[i - 1] + prevH[i + 1] - 2 * prevH[i];
+          v[i] += pressure * SPREAD;
+        }
+
+        for (let i = 1; i < N - 1; i++) {
+          v[i] += (prevH[i - 1] + prevH[i + 1] - 2 * prevH[i]) * VISCOSITY;
+        }
+
+        // 減衰
+        for (let i = 1; i < N - 1; i++) {
+          v[i] *= DAMPING;
+        }
+
+        // 高さ更新
+        for (let i = 1; i < N - 1; i++) {
+          h[i] += v[i];
+        }
+
+        // ---- 基準を固定する処理 ----
+        // 端を常に0にして水面のアンカーにする
+        h[0] = 0;
+        h[N - 1] = 0;
+
+        // 内部の平均値を求めて補正する
+        let sum = 0;
+        for (let i = 1; i < N - 1; i++) {
+          sum += h[i];
+        }
+        const offset = sum / (N - 2);
+        for (let i = 1; i < N - 1; i++) {
+          h[i] -= offset;
+        }
+      }
+
+      function updateRaindrops() {
+        const alive = [];
+        for (let drop of raindrops) {
+          // 落下
+          drop.vy += drop.gravity;
+          drop.y += drop.vy;
+
+          // 水面との衝突判定
+          const idx = xToIndex(drop.x);
+          const waveY = baseY + h[idx] * 2;
+
+          let removed = false;
+          if (drop.y >= waveY) {
+            const impact = Math.abs(drop.vy);
+            // 通常の飛沫の強さ
+            let strength = drop.mass * Math.sqrt(impact) * 0.8;
+            // 嵐のときは波を強める
+            if (stormActive) {
+              strength *= 2.0; // 好みに応じて 1.5〜3.0 くらいで調整
+            }
+            applySplash(drop.x, strength);
+            // 水面に当たったら一度で消える
+            removed = true;
+          }
+
+          // 画面のかなり下まで落ちたら消える（保険）
+          if (drop.y > height + 200) {
+            removed = true;
+          }
+
+          if (!removed) {
+            alive.push(drop);
+          }
+        }
+        raindrops = alive;
+      }
+
+      function drawRaindrops() {
+        ctx.strokeStyle = '#111111';
+        ctx.lineWidth = 1;
+
+        for (let drop of raindrops) {
+          ctx.beginPath();
+          ctx.moveTo(drop.x, drop.y - drop.length * 0.4);
+          ctx.lineTo(drop.x, drop.y + drop.length * 0.6);
+          ctx.stroke();
+        }
+      }
+
+      function drawWave() {
+        const AMP = 2.0;
+
+        ctx.beginPath();
+        for (let i = 0; i < N; i++) {
+          const x = (i / (N - 1)) * width;
+          const y = baseY + h[i] * AMP;
+          if (i === 0) {
+            ctx.moveTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
+        }
+
+        ctx.strokeStyle = '#111111';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      function draw() {
+        ctx.clearRect(0, 0, width, height);
+
+        ctx.fillStyle = '#f5f5f2';
+        ctx.fillRect(0, 0, width, height);
+
+        drawWave();
+        drawRaindrops();
+      }
+
+      function animate(timestamp) {
+        if (!lastTime) {
+          lastTime = timestamp;
+          nextIntensityChangeTime = timestamp + 8000; // 初回は8秒後くらいに変化
+        }
+        const dt = (timestamp - lastTime) / 1000; // 秒
+        lastTime = timestamp;
+
+        // 1/f ノイズっぽい揺らぎで雨の強さを更新
+        const nSlow = Math.random() - 0.5;
+        const nMid = Math.random() - 0.5;
+        const nFast = Math.random() - 0.5;
+
+        // 異なるタイムスケールのノイズをブレンドして、低周波優勢の揺らぎを作る
+        pinkSlow = pinkSlow * 0.995 + nSlow * 0.005; // とてもゆっくり
+        pinkMid = pinkMid * 0.97 + nMid * 0.03; // 中くらい
+        pinkFast = pinkFast * 0.7 + nFast * 0.3; // 細かい揺らぎ
+
+        let noiseValue = pinkSlow * 0.6 + pinkMid * 0.3 + pinkFast * 0.1;
+
+        // ベースは弱い雨 / ときどき完全に止む
+        let target = 0.3 + noiseValue; // 中心 0.3 くらい
+        target = Math.max(0, Math.min(1.0, target)); // 0〜1.0 にクリップ
+
+        // --- 短い「嵐」フェーズの管理 ---
+        if (!stormActive && timestamp >= nextStormTime) {
+          // 嵐開始: 2〜4秒くらい続く
+          stormActive = true;
+          const stormDuration = 2000 + Math.random() * 2000;
+          stormEndTime = timestamp + stormDuration;
+        }
+        if (stormActive && timestamp >= stormEndTime) {
+          // 嵐終了 → 次の嵐まで 7〜20秒くらい待つ
+          stormActive = false;
+          const wait = 7000 + Math.random() * 13000;
+          nextStormTime = timestamp + wait;
+        }
+
+        // 嵐のあいだは最低でもかなり強い雨にする
+        if (stormActive) {
+          target = Math.max(target, 0.8);
+        }
+
+        // ごく小さいときは完全に止んだとみなす
+        if (target < 0.07) {
+          target = 0;
+        }
+
+        const INTENSITY_LERP = 0.02;
+        rainIntensity += (target - rainIntensity) * INTENSITY_LERP;
+        rainIntensity = Math.max(0, Math.min(1, rainIntensity));
+
+        // 雨の強さに応じて 1 秒あたりの雨粒数を決める
+        // 軽い雨〜中くらいの雨を心地よく見せるため二乗カーブで調整
+        const eased = rainIntensity * rainIntensity;
+
+        // 嵐のときは雨粒の量も増やす
+        const baseDrops = 100 * eased;
+        const stormBoost = stormActive ? 2.5 : 1.0; // 嵐中は 2.5 倍
+        const dropsPerSecond = baseDrops * stormBoost;
+
+        if (dropsPerSecond > 0) {
+          dropAccumulator += dropsPerSecond * dt;
+          while (dropAccumulator >= 1) {
+            const x = Math.random() * width;
+            createRaindrop(x);
+            dropAccumulator -= 1;
+          }
+        }
+
+        updateWave();
+        updateRaindrops();
+        draw();
+        requestAnimationFrame(animate);
+      }
+      requestAnimationFrame(animate);
+
+      // クリックした位置にも雨を追加（おまけ）
+      canvas.addEventListener('click', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        createRaindrop(x);
+      });
+
+      // リサイズ対応（baseY も更新）
+      window.addEventListener('resize', () => {
+        width = window.innerWidth;
+        height = window.innerHeight;
+        canvas.width = width;
+        canvas.height = height;
+        baseY = height * 0.6;
+      });
+    </script>
+  </body>
+</html>
